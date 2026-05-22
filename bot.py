@@ -25,7 +25,7 @@ def load_config():
         errors.append("BOT_TOKEN not found. Add BOT_TOKEN=YOUR_NEW_BOT_TOKEN to Backend/.env")
 
     if not mini_app_url:
-        errors.append("WEB_APP_URL not found. Add WEB_APP_URL=https://https://tricky-corners-sit.loca.lt to Backend/.env")
+        errors.append("WEB_APP_URL not found. Add WEB_APP_URL=https://odil-star.github.io/telegram_react/ to Backend/.env")
     else:
         parsed_url = urlparse(mini_app_url)
         if parsed_url.scheme != "https" or not parsed_url.netloc:

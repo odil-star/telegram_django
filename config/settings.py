@@ -137,7 +137,6 @@ CORS_ALLOW_HEADERS = [
     "x-csrftoken",
     "x-requested-with",
     "x-telegram-id",
-    "x-admin-token",
 ]
 
 CSRF_TRUSTED_ORIGINS = [
