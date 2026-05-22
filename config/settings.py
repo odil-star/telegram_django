@@ -14,7 +14,17 @@ if ENV_FILE.exists():
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-fast-food-secret-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "1") == "1"
-ALLOWED_HOSTS = [host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",") if host.strip()]
+
+DEFAULT_ALLOWED_HOSTS = [
+    "telegram-django.onrender.com",
+    "localhost",
+    "127.0.0.1",
+]
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.getenv("DJANGO_ALLOWED_HOSTS", ",".join(DEFAULT_ALLOWED_HOSTS)).split(",")
+    if host.strip()
+]
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -109,9 +119,9 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 CORS_ALLOWED_ORIGINS = [
+    "https://odil-star.github.io",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "https://odil-star.github.io",
 ]
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://.*\.loca\.lt$",
@@ -131,16 +141,24 @@ CORS_ALLOW_HEADERS = [
 ]
 
 CSRF_TRUSTED_ORIGINS = [
+    "https://telegram-django.onrender.com",
+    "https://odil-star.github.io",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "https://odil-star.github.io",
     "https://*.loca.lt",
 ]
 
+SESSION_COOKIE_SAMESITE = "None"
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SAMESITE = "None"
+CSRF_COOKIE_SECURE = True
+CSRF_FAILURE_VIEW = "api.views.csrf_failure"
+
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.AllowAny"],
+    "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.SessionAuthentication"],
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
+    "EXCEPTION_HANDLER": "api.views.api_exception_handler",
 }
 
 BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")
-ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "dev-admin-token")

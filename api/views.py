@@ -1,27 +1,99 @@
 import hashlib
 import hmac
 import json
+from datetime import timedelta
 from urllib.parse import parse_qsl
 
 from django.conf import settings
-from django.db.models import Count, Q, Sum
+from django.contrib.auth import authenticate, get_user_model, login, logout
+from django.contrib.auth.models import Group
+from django.db.models import Count, Q
+from django.http import JsonResponse
+from django.middleware.csrf import get_token
+from django.utils import timezone
+from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework import status, viewsets
-from rest_framework.decorators import api_view, parser_classes
+from rest_framework.decorators import api_view
+from rest_framework.exceptions import NotAuthenticated, PermissionDenied
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
+from rest_framework.views import exception_handler
 
+from api.models import Lead, SiteVisit, Task
 from orders.models import Order
 from products.models import Category, Product, PromoBanner
 from users.models import Address, TelegramUser
 from .serializers import (
     AddressSerializer,
+    AdminUserSerializer,
     PromoBannerSerializer,
     CategorySerializer,
+    LeadSerializer,
     OrderCreateSerializer,
     OrderSerializer,
     ProductSerializer,
+    SiteVisitSerializer,
+    TaskSerializer,
     TelegramUserSerializer,
+    get_user_role,
 )
+
+User = get_user_model()
+
+
+def api_exception_handler(exc, context):
+    response = exception_handler(exc, context)
+    if response is None:
+        return response
+
+    if isinstance(exc, NotAuthenticated):
+        response.status_code = status.HTTP_401_UNAUTHORIZED
+        response.data = {"authenticated": False, "message": "Требуется вход"}
+    elif isinstance(exc, PermissionDenied):
+        response.status_code = status.HTTP_403_FORBIDDEN
+        response.data = {"success": False, "message": str(exc.detail)}
+    return response
+
+
+def csrf_failure(request, reason=""):
+    return JsonResponse(
+        {"success": False, "message": "CSRF verification failed", "reason": reason},
+        status=403,
+    )
+
+
+def json_not_found(request, exception=None):
+    return JsonResponse({"detail": "Not found."}, status=404)
+
+
+def json_server_error(request):
+    return JsonResponse({"detail": "Server error."}, status=500)
+
+
+def admin_user_payload(user):
+    return {
+        "id": user.id,
+        "username": user.username,
+        "role": get_user_role(user),
+    }
+
+
+def can_access_admin_api(user):
+    if not user.is_authenticated:
+        return False
+    if user.is_superuser or user.is_staff:
+        return True
+    return user.groups.filter(name__in=["admin", "manager"]).exists()
+
+
+def require_admin_session(request, *, superuser=False):
+    if not request.user.is_authenticated:
+        return Response({"authenticated": False, "message": "Требуется вход"}, status=status.HTTP_401_UNAUTHORIZED)
+    if superuser and not request.user.is_superuser:
+        return Response({"success": False, "message": "Недостаточно прав"}, status=status.HTTP_403_FORBIDDEN)
+    if not can_access_admin_api(request.user):
+        return Response({"success": False, "message": "Недостаточно прав"}, status=status.HTTP_403_FORBIDDEN)
+    return None
 
 
 def verify_telegram_init_data(init_data):
@@ -51,11 +123,6 @@ def user_from_request(request):
     return TelegramUser.objects.filter(telegram_id=str(telegram_id)).first()
 
 
-def admin_allowed(request):
-    token = request.headers.get("X-Admin-Token") or request.query_params.get("admin_token")
-    return bool(settings.ADMIN_API_TOKEN and token == settings.ADMIN_API_TOKEN)
-
-
 def require_user(request):
     user = user_from_request(request)
     if not user:
@@ -63,10 +130,47 @@ def require_user(request):
     return user, None
 
 
-def require_admin(request):
-    if not admin_allowed(request):
-        return Response({"detail": "Admin token is invalid."}, status=status.HTTP_403_FORBIDDEN)
-    return None
+@api_view(["GET"])
+def health(request):
+    return Response({"status": "ok"})
+
+
+@ensure_csrf_cookie
+@api_view(["GET"])
+def csrf_token(request):
+    token = get_token(request)
+    return Response({"success": True, "message": "CSRF cookie set", "csrfToken": token})
+
+
+@api_view(["POST"])
+def admin_login(request):
+    username = (request.data.get("username") or "").strip()
+    password = request.data.get("password") or ""
+    user = authenticate(request, username=username, password=password)
+    if user is None:
+        return Response(
+            {"success": False, "message": "Неверный логин или пароль"},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+    if not can_access_admin_api(user):
+        return Response({"success": False, "message": "Недостаточно прав"}, status=status.HTTP_403_FORBIDDEN)
+
+    login(request, user)
+    return Response({"success": True, "user": admin_user_payload(user)})
+
+
+@api_view(["GET"])
+def admin_me(request):
+    error = require_admin_session(request)
+    if error:
+        return error
+    return Response({"authenticated": True, "user": admin_user_payload(request.user)})
+
+
+@api_view(["POST"])
+def admin_logout(request):
+    logout(request)
+    return Response({"success": True})
 
 
 @api_view(["POST"])
@@ -199,23 +303,140 @@ def order_detail(request, pk):
 
 @api_view(["GET"])
 def admin_dashboard(request):
-    error = require_admin(request)
+    error = require_admin_session(request)
     if error:
         return error
-    completed_sales = Order.objects.exclude(status=Order.Status.CANCELED).aggregate(total=Sum("total_amount"))["total"] or 0
+    now = timezone.now()
+    today = timezone.localdate(now)
+    week_start = now - timedelta(days=7)
+    month_start = now - timedelta(days=30)
     return Response(
         {
-            "orders_total": Order.objects.count(),
-            "new_orders": Order.objects.filter(status=Order.Status.NEW).count(),
-            "sales_total": completed_sales,
-            "products_total": Product.objects.count(),
+            "leads": {
+                "total": Lead.objects.count(),
+                "new": Lead.objects.filter(status=Lead.Status.NEW).count(),
+                "in_work": Lead.objects.filter(status=Lead.Status.IN_WORK).count(),
+                "completed": Lead.objects.filter(status=Lead.Status.COMPLETED).count(),
+                "rejected": Lead.objects.filter(status=Lead.Status.REJECTED).count(),
+            },
+            "users": {
+                "total": User.objects.count(),
+                "admins": User.objects.filter(Q(is_superuser=True) | Q(is_staff=True) | Q(groups__name="admin"))
+                .distinct()
+                .count(),
+                "managers": User.objects.filter(groups__name="manager").distinct().count(),
+            },
+            "tasks": {
+                "total": Task.objects.count(),
+                "open": Task.objects.filter(status=Task.Status.OPEN).count(),
+                "done": Task.objects.filter(status=Task.Status.DONE).count(),
+            },
+            "visits": {
+                "today": SiteVisit.objects.filter(created_at__date=today).count(),
+                "week": SiteVisit.objects.filter(created_at__gte=week_start).count(),
+                "month": SiteVisit.objects.filter(created_at__gte=month_start).count(),
+            },
         }
     )
 
 
 @api_view(["GET"])
+def admin_leads(request):
+    error = require_admin_session(request)
+    if error:
+        return error
+    queryset = Lead.objects.select_related("assigned_to")
+    return Response(LeadSerializer(queryset, many=True).data)
+
+
+@api_view(["PATCH"])
+def admin_lead_detail(request, pk):
+    error = require_admin_session(request)
+    if error:
+        return error
+    lead = Lead.objects.filter(pk=pk).first()
+    if not lead:
+        return Response({"detail": "Lead not found."}, status=status.HTTP_404_NOT_FOUND)
+    serializer = LeadSerializer(lead, data=request.data, partial=True)
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data)
+
+
+@api_view(["GET", "POST"])
+def admin_users(request):
+    error = require_admin_session(request, superuser=True)
+    if error:
+        return error
+    if request.method == "GET":
+        queryset = User.objects.prefetch_related("groups").order_by("username")
+        return Response(AdminUserSerializer(queryset, many=True).data)
+
+    username = (request.data.get("username") or "").strip()
+    password = request.data.get("password") or ""
+    role = request.data.get("role") or "manager"
+    if role not in {"admin", "manager"}:
+        return Response({"message": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
+    if not username or not password:
+        return Response({"message": "Username and password are required."}, status=status.HTTP_400_BAD_REQUEST)
+    if User.objects.filter(username=username).exists():
+        return Response({"message": "User already exists."}, status=status.HTTP_400_BAD_REQUEST)
+
+    user = User.objects.create_user(username=username, password=password)
+    user.is_staff = role == "admin"
+    user.save(update_fields=["is_staff"])
+    group, _ = Group.objects.get_or_create(name=role)
+    user.groups.add(group)
+    return Response(AdminUserSerializer(user).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET", "POST"])
+def admin_tasks(request):
+    error = require_admin_session(request)
+    if error:
+        return error
+    if request.method == "GET":
+        queryset = Task.objects.select_related("assigned_to", "created_by")
+        return Response(TaskSerializer(queryset, many=True).data)
+
+    serializer = TaskSerializer(data=request.data)
+    serializer.is_valid(raise_exception=True)
+    task = serializer.save(created_by=request.user)
+    return Response(TaskSerializer(task).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["PATCH"])
+def admin_task_detail(request, pk):
+    error = require_admin_session(request)
+    if error:
+        return error
+    task = Task.objects.filter(pk=pk).first()
+    if not task:
+        return Response({"detail": "Task not found."}, status=status.HTTP_404_NOT_FOUND)
+    serializer = TaskSerializer(task, data=request.data, partial=True)
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data)
+
+
+@api_view(["POST"])
+def analytics_visit(request):
+    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    ip_address = forwarded_for.split(",")[0].strip() or request.META.get("REMOTE_ADDR")
+    data = {
+        "page_url": request.data.get("page_url") or request.META.get("HTTP_REFERER") or "https://odil-star.github.io/",
+        "referrer": request.data.get("referrer") or "",
+        "user_agent": request.data.get("user_agent") or request.META.get("HTTP_USER_AGENT") or "",
+    }
+    serializer = SiteVisitSerializer(data=data)
+    serializer.is_valid(raise_exception=True)
+    visit = serializer.save(ip_address=ip_address)
+    return Response(SiteVisitSerializer(visit).data, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET"])
 def admin_orders(request):
-    error = require_admin(request)
+    error = require_admin_session(request)
     if error:
         return error
     queryset = Order.objects.select_related("user").prefetch_related("items", "items__product")
@@ -227,7 +448,7 @@ def admin_orders(request):
 
 @api_view(["PATCH"])
 def admin_order_status(request, pk):
-    error = require_admin(request)
+    error = require_admin_session(request)
     if error:
         return error
     order = Order.objects.filter(pk=pk).first()
@@ -241,20 +462,22 @@ def admin_order_status(request, pk):
     return Response(OrderSerializer(order, context={"request": request}).data)
 
 
-class AdminTokenMixin:
+class AdminSessionMixin:
     parser_classes = [JSONParser, FormParser, MultiPartParser]
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
-        if not admin_allowed(request):
-            self.permission_denied(request, message="Admin token is invalid.")
+        if not request.user.is_authenticated:
+            raise NotAuthenticated("Требуется вход")
+        if not can_access_admin_api(request.user):
+            raise PermissionDenied("Недостаточно прав")
 
 
-class AdminProductViewSet(AdminTokenMixin, viewsets.ModelViewSet):
+class AdminProductViewSet(AdminSessionMixin, viewsets.ModelViewSet):
     queryset = Product.objects.select_related("category").all()
     serializer_class = ProductSerializer
 
 
-class AdminCategoryViewSet(AdminTokenMixin, viewsets.ModelViewSet):
+class AdminCategoryViewSet(AdminSessionMixin, viewsets.ModelViewSet):
     queryset = Category.objects.all()
     serializer_class = CategorySerializer

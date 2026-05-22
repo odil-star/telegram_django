@@ -1,10 +1,89 @@
 from decimal import Decimal
 
+from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
+from api.models import Lead, SiteVisit, Task
 from orders.models import Order, OrderItem
 from products.models import Category, Product, PromoBanner
 from users.models import Address, TelegramUser
+
+User = get_user_model()
+
+
+def get_user_role(user):
+    if user.is_superuser:
+        return "superuser"
+    if user.groups.filter(name="admin").exists() or user.is_staff:
+        return "admin"
+    if user.groups.filter(name="manager").exists():
+        return "manager"
+    return "manager"
+
+
+class AdminUserSerializer(serializers.ModelSerializer):
+    role = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ("id", "username", "role", "is_active", "is_staff", "is_superuser", "date_joined")
+        read_only_fields = fields
+
+    def get_role(self, obj):
+        return get_user_role(obj)
+
+
+class LeadSerializer(serializers.ModelSerializer):
+    assigned_to = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), required=False, allow_null=True)
+    assigned_to_user = AdminUserSerializer(source="assigned_to", read_only=True)
+
+    class Meta:
+        model = Lead
+        fields = (
+            "id",
+            "name",
+            "phone",
+            "service",
+            "tariff",
+            "message",
+            "status",
+            "assigned_to",
+            "assigned_to_user",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "created_at", "updated_at", "assigned_to_user")
+
+
+class TaskSerializer(serializers.ModelSerializer):
+    assigned_to = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), required=False, allow_null=True)
+    assigned_to_user = AdminUserSerializer(source="assigned_to", read_only=True)
+    created_by_user = AdminUserSerializer(source="created_by", read_only=True)
+
+    class Meta:
+        model = Task
+        fields = (
+            "id",
+            "title",
+            "description",
+            "assigned_to",
+            "assigned_to_user",
+            "created_by",
+            "created_by_user",
+            "status",
+            "priority",
+            "due_date",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "created_by", "created_by_user", "created_at", "updated_at")
+
+
+class SiteVisitSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SiteVisit
+        fields = ("id", "page_url", "referrer", "user_agent", "ip_address", "created_at")
+        read_only_fields = ("id", "ip_address", "created_at")
 
 
 class AddressSerializer(serializers.ModelSerializer):
