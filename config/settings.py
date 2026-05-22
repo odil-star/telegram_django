@@ -13,7 +13,7 @@ if ENV_FILE.exists():
         os.environ.setdefault(key.strip(), value.strip())
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-fast-food-secret-key")
-DEBUG = os.getenv("DJANGO_DEBUG", "1") == "1"
+DEBUG = os.getenv("DJANGO_DEBUG", "0") == "1"
 
 DEFAULT_ALLOWED_HOSTS = [
     "telegram-django.onrender.com",
@@ -72,7 +72,7 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 
-DB_ENGINE = os.getenv("DB_ENGINE", "mysql").strip().lower()
+DB_ENGINE = os.getenv("DB_ENGINE", "sqlite").strip().lower()
 
 if DB_ENGINE == "sqlite":
     DATABASES = {
