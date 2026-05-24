@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.contrib.auth.models import Group
+from django.db import OperationalError, ProgrammingError
 from django.db.models import Count, Q
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
@@ -42,6 +43,7 @@ from .serializers import (
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
+DATABASE_NOT_READY_ERRORS = (OperationalError, ProgrammingError)
 
 
 def log_api_errors(view_func):
@@ -54,6 +56,19 @@ def log_api_errors(view_func):
             raise
 
     return wrapped
+
+
+def database_not_ready_response(exc, fallback=None, status_code=status.HTTP_503_SERVICE_UNAVAILABLE):
+    logger.exception("Database is not ready or migrations are missing")
+    if fallback is not None:
+        return Response(fallback)
+    return Response(
+        {
+            "detail": "Database is not ready. Set DATABASE_URL and run migrations.",
+            "error": exc.__class__.__name__,
+        },
+        status=status_code,
+    )
 
 
 def api_exception_handler(exc, context):
@@ -211,16 +226,19 @@ def telegram_auth(request):
     if not telegram_id:
         return Response({"detail": "telegram_id is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-    user, _ = TelegramUser.objects.update_or_create(
-        telegram_id=str(telegram_id),
-        defaults={
-            "first_name": telegram_user.get("first_name", "") or "",
-            "last_name": telegram_user.get("last_name", "") or "",
-            "username": telegram_user.get("username", "") or "",
-            "photo_url": telegram_user.get("photo_url", "") or "",
-        },
-    )
-    Address.objects.get_or_create(user=user)
+    try:
+        user, _ = TelegramUser.objects.update_or_create(
+            telegram_id=str(telegram_id),
+            defaults={
+                "first_name": telegram_user.get("first_name", "") or "",
+                "last_name": telegram_user.get("last_name", "") or "",
+                "username": telegram_user.get("username", "") or "",
+                "photo_url": telegram_user.get("photo_url", "") or "",
+            },
+        )
+        Address.objects.get_or_create(user=user)
+    except DATABASE_NOT_READY_ERRORS as exc:
+        return database_not_ready_response(exc)
     return Response({"user": TelegramUserSerializer(user).data})
 
 
@@ -251,43 +269,55 @@ def profile_address(request):
 @api_view(["GET"])
 @log_api_errors
 def categories(request):
-    queryset = Category.objects.filter(is_active=True).annotate(
-        products_count=Count("products", filter=Q(products__is_active=True))
-    )
-    return Response(CategorySerializer(queryset, many=True).data)
+    try:
+        queryset = Category.objects.filter(is_active=True).annotate(
+            products_count=Count("products", filter=Q(products__is_active=True))
+        )
+        return Response(CategorySerializer(queryset, many=True).data)
+    except DATABASE_NOT_READY_ERRORS as exc:
+        return database_not_ready_response(exc, fallback=[])
 
 
 @api_view(["GET"])
 @log_api_errors
 def products(request):
-    queryset = Product.objects.select_related("category").filter(is_active=True, category__is_active=True)
-    category = request.query_params.get("category")
-    search = request.query_params.get("search")
-    if category and category != "all":
-        queryset = queryset.filter(Q(category__slug=category) | Q(category_id=category))
-    if search:
-        queryset = queryset.filter(Q(name__icontains=search) | Q(description__icontains=search))
-    return Response(ProductSerializer(queryset, many=True, context={"request": request}).data)
+    try:
+        queryset = Product.objects.select_related("category").filter(is_active=True, category__is_active=True)
+        category = request.query_params.get("category")
+        search = request.query_params.get("search")
+        if category and category != "all":
+            queryset = queryset.filter(Q(category__slug=category) | Q(category_id=category))
+        if search:
+            queryset = queryset.filter(Q(name__icontains=search) | Q(description__icontains=search))
+        return Response(ProductSerializer(queryset, many=True, context={"request": request}).data)
+    except DATABASE_NOT_READY_ERRORS as exc:
+        return database_not_ready_response(exc, fallback=[])
 
 
 @api_view(["GET"])
 @log_api_errors
 def top_products(request):
-    queryset = Product.objects.select_related("category").filter(is_active=True, category__is_active=True, is_top=True)
-    return Response(ProductSerializer(queryset, many=True, context={"request": request}).data)
+    try:
+        queryset = Product.objects.select_related("category").filter(is_active=True, category__is_active=True, is_top=True)
+        return Response(ProductSerializer(queryset, many=True, context={"request": request}).data)
+    except DATABASE_NOT_READY_ERRORS as exc:
+        return database_not_ready_response(exc, fallback=[])
 
 
 @api_view(["GET"])
 @log_api_errors
 def promo_products(request):
-    queryset = Product.objects.select_related("category").filter(is_active=True, category__is_active=True, is_promo=True)
-    banners = PromoBanner.objects.select_related("product", "product__category").filter(is_active=True)
-    return Response(
-        {
-            "banners": PromoBannerSerializer(banners, many=True, context={"request": request}).data,
-            "products": ProductSerializer(queryset, many=True, context={"request": request}).data,
-        }
-    )
+    try:
+        queryset = Product.objects.select_related("category").filter(is_active=True, category__is_active=True, is_promo=True)
+        banners = PromoBanner.objects.select_related("product", "product__category").filter(is_active=True)
+        return Response(
+            {
+                "banners": PromoBannerSerializer(banners, many=True, context={"request": request}).data,
+                "products": ProductSerializer(queryset, many=True, context={"request": request}).data,
+            }
+        )
+    except DATABASE_NOT_READY_ERRORS as exc:
+        return database_not_ready_response(exc, fallback={"banners": [], "products": []})
 
 
 @api_view(["POST"])
@@ -451,7 +481,10 @@ def analytics_visit(request):
     }
     serializer = SiteVisitSerializer(data=data)
     serializer.is_valid(raise_exception=True)
-    visit = serializer.save(ip_address=ip_address)
+    try:
+        visit = serializer.save(ip_address=ip_address)
+    except DATABASE_NOT_READY_ERRORS as exc:
+        return database_not_ready_response(exc)
     return Response(SiteVisitSerializer(visit).data, status=status.HTTP_201_CREATED)
 
 
