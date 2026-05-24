@@ -19,7 +19,6 @@ DEBUG = os.getenv("DJANGO_DEBUG", "0") == "1"
 
 DEFAULT_ALLOWED_HOSTS = [
     "telegram-django.onrender.com",
-    "localhost",
     "127.0.0.1",
 ]
 ALLOWED_HOSTS = [
@@ -74,39 +73,13 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
-DB_ENGINE = os.getenv("DB_ENGINE", "sqlite").strip().lower()
-
-if DATABASE_URL:
-    DATABASES = {
-        "default": dj_database_url.config(
-            default=DATABASE_URL,
-            conn_max_age=600,
-            conn_health_checks=True,
-            ssl_require=os.getenv("DB_SSL_REQUIRE", "1") == "1",
-        )
-    }
-elif DB_ENGINE == "sqlite":
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": os.getenv("SQLITE_NAME", BASE_DIR / "db.sqlite3"),
-        }
-    }
-else:
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.mysql",
-            "NAME": os.getenv("DB_NAME", "landing_db"),
-            "USER": os.getenv("DB_USER", "root"),
-            "PASSWORD": os.getenv("DB_PASSWORD", ""),
-            "HOST": os.getenv("DB_HOST", "127.0.0.1"),
-            "PORT": os.getenv("DB_PORT", "3306"),
-            "OPTIONS": {
-                "charset": "utf8mb4",
-            },
-        }
-    }
+DATABASES = {
+    "default": dj_database_url.config(
+        default=os.environ.get("DATABASE_URL"),
+        conn_max_age=600,
+        ssl_require=True,
+    )
+}
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -132,7 +105,6 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 CORS_ALLOWED_ORIGINS = [
     "https://odil-star.github.io",
-    "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
 CORS_ALLOWED_ORIGIN_REGEXES = [
@@ -154,7 +126,6 @@ CORS_ALLOW_HEADERS = [
 CSRF_TRUSTED_ORIGINS = [
     "https://telegram-django.onrender.com",
     "https://odil-star.github.io",
-    "http://localhost:5173",
     "http://127.0.0.1:5173",
     "https://*.loca.lt",
 ]
