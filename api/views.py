@@ -1,7 +1,9 @@
 import hashlib
 import hmac
 import json
+import logging
 from datetime import timedelta
+from functools import wraps
 from urllib.parse import parse_qsl
 
 from django.conf import settings
@@ -39,6 +41,19 @@ from .serializers import (
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
+
+
+def log_api_errors(view_func):
+    @wraps(view_func)
+    def wrapped(*args, **kwargs):
+        try:
+            return view_func(*args, **kwargs)
+        except Exception:
+            logger.exception("Unhandled API error in %s", view_func.__name__)
+            raise
+
+    return wrapped
 
 
 def api_exception_handler(exc, context):
@@ -174,6 +189,7 @@ def admin_logout(request):
 
 
 @api_view(["POST"])
+@log_api_errors
 def telegram_auth(request):
     init_data = request.data.get("initData") or request.data.get("init_data") or ""
     init_data_unsafe = request.data.get("initDataUnsafe") or request.data.get("init_data_unsafe") or {}
@@ -233,6 +249,7 @@ def profile_address(request):
 
 
 @api_view(["GET"])
+@log_api_errors
 def categories(request):
     queryset = Category.objects.filter(is_active=True).annotate(
         products_count=Count("products", filter=Q(products__is_active=True))
@@ -241,6 +258,7 @@ def categories(request):
 
 
 @api_view(["GET"])
+@log_api_errors
 def products(request):
     queryset = Product.objects.select_related("category").filter(is_active=True, category__is_active=True)
     category = request.query_params.get("category")
@@ -253,12 +271,14 @@ def products(request):
 
 
 @api_view(["GET"])
+@log_api_errors
 def top_products(request):
     queryset = Product.objects.select_related("category").filter(is_active=True, category__is_active=True, is_top=True)
     return Response(ProductSerializer(queryset, many=True, context={"request": request}).data)
 
 
 @api_view(["GET"])
+@log_api_errors
 def promo_products(request):
     queryset = Product.objects.select_related("category").filter(is_active=True, category__is_active=True, is_promo=True)
     banners = PromoBanner.objects.select_related("product", "product__category").filter(is_active=True)
@@ -420,6 +440,7 @@ def admin_task_detail(request, pk):
 
 
 @api_view(["POST"])
+@log_api_errors
 def analytics_visit(request):
     forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR", "")
     ip_address = forwarded_for.split(",")[0].strip() or request.META.get("REMOTE_ADDR")
